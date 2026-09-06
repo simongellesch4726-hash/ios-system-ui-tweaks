@@ -1,73 +1,146 @@
 #import <UIKit/UIKit.h>
 #import <QuartzCore/QuartzCore.h>
+#import <objc/runtime.h>
+#import <substrate.h>
 
-static CFTimeInterval RPFSessionStart = 0;
-static __thread BOOL RPFInternalTextUpdate = NO;
+static const void *kRPFTrackedLabelKey = &kRPFTrackedLabelKey;
+static const void *kRPFSessionStartKey = &kRPFSessionStartKey;
+static const void *kRPFInternalUpdateKey = &kRPFInternalUpdateKey;
+
+static void (*orig_SBRecordingIndicator_updateVisibility)(id, SEL, BOOL);
+static void (*orig_SBRecordingIndicator_updateVisibilitySkip)(id, SEL, BOOL, BOOL);
+static void (*orig_UILabel_setText)(UILabel *, SEL, NSString *);
 
 static BOOL RPFParseElapsed(NSString *text, NSInteger *seconds) {
-    if (!text) return NO;
+    if (![text isKindOfClass:NSString.class]) return NO;
     NSArray<NSString *> *parts = [text componentsSeparatedByString:@":"];
     if (parts.count != 2 || parts[0].length == 0 || parts[0].length > 3 || parts[1].length != 2) return NO;
 
-    NSCharacterSet *digits = [NSCharacterSet decimalDigitCharacterSet];
-    if ([parts[0] rangeOfCharacterFromSet:[digits invertedSet]].location != NSNotFound ||
-        [parts[1] rangeOfCharacterFromSet:[digits invertedSet]].location != NSNotFound) return NO;
+    NSCharacterSet *digits = NSCharacterSet.decimalDigitCharacterSet;
+    if ([parts[0] rangeOfCharacterFromSet:digits.invertedSet].location != NSNotFound ||
+        [parts[1] rangeOfCharacterFromSet:digits.invertedSet].location != NSNotFound) return NO;
 
     NSInteger minutes = parts[0].integerValue;
-    NSInteger remainingSeconds = parts[1].integerValue;
-    if (remainingSeconds < 0 || remainingSeconds > 59) return NO;
-
-    if (seconds) *seconds = minutes * 60 + remainingSeconds;
+    NSInteger secs = parts[1].integerValue;
+    if (secs < 0 || secs > 59) return NO;
+    if (seconds) *seconds = minutes * 60 + secs;
     return YES;
 }
 
-static BOOL RPFHasRecordingAppearance(UIView *view) {
-    for (UIView *v = view; v; v = v.superview) {
-        UIColor *color = v.backgroundColor;
-        CGFloat r = 0, g = 0, b = 0, a = 0;
-        if (color && [color getRed:&r green:&g blue:&b alpha:&a] &&
-            a > 0.5 && r > 0.45 && r > g * 1.5 && r > b * 1.5) {
-            return YES;
-        }
+static void RPFCollectTimerLabels(UIView *view, NSMutableArray<UILabel *> *labels) {
+    if ([view isKindOfClass:UILabel.class]) {
+        UILabel *label = (UILabel *)view;
+        NSInteger seconds = 0;
+        if (RPFParseElapsed(label.text, &seconds)) [labels addObject:label];
     }
-    return NO;
+    for (UIView *subview in view.subviews) RPFCollectTimerLabels(subview, labels);
 }
 
-static BOOL RPFIsCandidate(UILabel *label, NSInteger *systemSeconds) {
-    if (!label.window || !RPFHasRecordingAppearance(label)) return NO;
-    return RPFParseElapsed(label.text, systemSeconds);
+static NSArray<UILabel *> *RPFLabelsForController(id controller) {
+    SEL indicatorSelector = NSSelectorFromString(@"indicatorView");
+    if (![controller respondsToSelector:indicatorSelector]) return @[];
+
+    UIView *indicator = ((id (*)(id, SEL))objc_msgSend)(controller, indicatorSelector);
+    if (![indicator isKindOfClass:UIView.class]) return @[];
+
+    NSMutableArray<UILabel *> *labels = [NSMutableArray array];
+    RPFCollectTimerLabels(indicator, labels);
+    for (UILabel *label in labels) {
+        objc_setAssociatedObject(label, kRPFTrackedLabelKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+    return labels;
 }
 
-static void RPFUpdateLabel(UILabel *label) {
-    if (RPFInternalTextUpdate) return;
+static CFTimeInterval RPFSessionStartForController(id controller) {
+    NSNumber *stored = objc_getAssociatedObject(controller, kRPFSessionStartKey);
+    return stored ? stored.doubleValue : 0;
+}
+
+static void RPFSetSessionStart(id controller, CFTimeInterval start) {
+    objc_setAssociatedObject(controller, kRPFSessionStartKey, @(start), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+}
+
+static void RPFRewriteLabel(UILabel *label, id controller) {
+    if (!objc_getAssociatedObject(label, kRPFTrackedLabelKey)) return;
+    if ([objc_getAssociatedObject(label, kRPFInternalUpdateKey) boolValue]) return;
 
     NSInteger displayed = 0;
-    if (!RPFIsCandidate(label, &displayed)) return;
+    if (!RPFParseElapsed(label.text, &displayed)) return;
 
     CFTimeInterval now = CACurrentMediaTime();
-    NSInteger expected = RPFSessionStart > 0 ? MAX(0, (NSInteger)floor(now - RPFSessionStart)) : -1;
+    CFTimeInterval start = RPFSessionStartForController(controller);
+    if (start <= 0) {
+        start = now - displayed;
+        RPFSetSessionStart(controller, start);
+    }
 
-    if (RPFSessionStart == 0 || displayed + 5 < expected) {
-        RPFSessionStart = now - displayed;
+    NSInteger expected = MAX(0, (NSInteger)floor(now - start));
+    // The system may recreate the visual timer after the indicator is hidden.
+    // Keep the persistent controller session as the source of truth in that case.
+    if (displayed > expected + 2) {
+        start = now - displayed;
+        RPFSetSessionStart(controller, start);
         expected = displayed;
     }
 
     NSString *replacement = [NSString stringWithFormat:@"%ld:%02ld", (long)(expected / 60), (long)(expected % 60)];
     if ([label.text isEqualToString:replacement]) return;
 
-    RPFInternalTextUpdate = YES;
+    objc_setAssociatedObject(label, kRPFInternalUpdateKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     label.text = replacement;
-    RPFInternalTextUpdate = NO;
+    objc_setAssociatedObject(label, kRPFInternalUpdateKey, nil, OBJC_ASSOCIATION_ASSIGN);
 }
 
-%hook UILabel
-- (void)didMoveToWindow {
-    %orig;
-    if (self.window) RPFUpdateLabel(self);
+static void RPFRefreshController(id controller) {
+    for (UILabel *label in RPFLabelsForController(controller)) RPFRewriteLabel(label, controller);
 }
 
-- (void)setText:(NSString *)text {
-    %orig(text);
-    if (!RPFInternalTextUpdate) RPFUpdateLabel(self);
+static void rpf_updateVisibility(id self, SEL _cmd, BOOL visible) {
+    orig_SBRecordingIndicator_updateVisibility(self, _cmd, visible);
+    if (!visible) return;
+    dispatch_async(dispatch_get_main_queue(), ^{ RPFRefreshController(self); });
 }
-%end
+
+static void rpf_updateVisibilitySkip(id self, SEL _cmd, BOOL visible, BOOL skip) {
+    orig_SBRecordingIndicator_updateVisibilitySkip(self, _cmd, visible, skip);
+    if (!visible) return;
+    dispatch_async(dispatch_get_main_queue(), ^{ RPFRefreshController(self); });
+}
+
+static void rpf_setText(UILabel *self, SEL _cmd, NSString *text) {
+    orig_UILabel_setText(self, _cmd, text);
+    if (!objc_getAssociatedObject(self, kRPFTrackedLabelKey)) return;
+    if ([objc_getAssociatedObject(self, kRPFInternalUpdateKey) boolValue]) return;
+
+    // A tracked label is only created from the authoritative recording-indicator view.
+    // Its controller is recovered by walking the responder chain when the system refreshes it.
+    UIResponder *responder = self;
+    id controller = nil;
+    while (responder) {
+        if ([NSStringFromClass(responder.class) isEqualToString:@"SBRecordingIndicatorViewController"]) {
+            controller = responder;
+            break;
+        }
+        responder = responder.nextResponder;
+    }
+    if (controller) RPFRewriteLabel(self, controller);
+}
+
+%ctor {
+    @autoreleasepool {
+        Class controller = objc_getClass("SBRecordingIndicatorViewController");
+        if (!controller) return;
+
+        SEL visibility = NSSelectorFromString(@"updateIndicatorVisibility:");
+        if (class_respondsToSelector(controller, visibility)) {
+            MSHookMessageEx(controller, visibility, (IMP)rpf_updateVisibility, (IMP *)&orig_SBRecordingIndicator_updateVisibility);
+        }
+
+        SEL visibilitySkip = NSSelectorFromString(@"updateIndicatorVisibility:skipFadeOutAnimation:");
+        if (class_respondsToSelector(controller, visibilitySkip)) {
+            MSHookMessageEx(controller, visibilitySkip, (IMP)rpf_updateVisibilitySkip, (IMP *)&orig_SBRecordingIndicator_updateVisibilitySkip);
+        }
+
+        MSHookMessageEx(UILabel.class, @selector(setText:), (IMP)rpf_setText, (IMP *)&orig_UILabel_setText);
+    }
+}
