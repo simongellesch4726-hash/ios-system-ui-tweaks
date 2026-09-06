@@ -30,14 +30,22 @@ jobs:
             sleep 2
           done
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends ca-certificates curl git make perl python3 clang llvm lld dpkg-dev fakeroot xz-utils file
+          sudo apt-get install -y --no-install-recommends \
+            build-essential ca-certificates curl git make perl python3 \
+            dpkg-dev fakeroot xz-utils file rsync zip libxml2 libtinfo6
 
-      - name: Install RootHide Theos
+      - name: Install RootHide Theos and iOS toolchain
         shell: bash
         run: |
           set -euxo pipefail
           git clone --depth=1 --recursive https://github.com/roothide/theos.git "$THEOS"
           test -f "$THEOS/makefiles/common.mk"
+          mkdir -p "$THEOS/toolchain"
+          curl --fail --location --retry 5 --retry-delay 2 \
+            https://github.com/L1ghtmann/llvm-project/releases/latest/download/iOSToolchain-x86_64.tar.xz \
+            -o /tmp/iOSToolchain.tar.xz
+          tar -xJf /tmp/iOSToolchain.tar.xz -C "$THEOS/toolchain"
+          test -x "$THEOS/toolchain/linux/iphone/bin/clang"
           "$THEOS/bin/install-sdk" latest
           find "$THEOS/sdks" -maxdepth 1 -name '*.sdk' -print -quit | grep -q .
 
