@@ -16,7 +16,8 @@ for deb in "$@"; do
   test "$(dpkg-deb -f "$deb" Architecture)" = "iphoneos-arm64"
 
   tmp="$(mktemp -d)"
-  trap 'rm -rf "$tmp"' EXIT
+  cleanup() { rm -rf "$tmp"; }
+  trap cleanup EXIT
   dpkg-deb -x "$deb" "$tmp"
 
   if find "$tmp" -path '*/var/jb/*' -print -quit | grep -q .; then
@@ -28,8 +29,6 @@ for deb in "$@"; do
   test "${#dylibs[@]}" -eq 1
   arch_info="$($LIPO -info "${dylibs[0]}")"
   echo "$arch_info"
-  echo "$arch_info" | grep -Eq 'arm64'
+  echo "$arch_info" | grep -Eq '(^|[^a-z0-9])arm64([^a-z0-9]|$)'
 
-  rm -rf "$tmp"
-  trap - EXIT
 done
