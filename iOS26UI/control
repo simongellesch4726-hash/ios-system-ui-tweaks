@@ -1,7 +1,7 @@
 Package: com.simongellesch.ios26ui
 Name: iOS26UI
-Version: 0.1.1
-Architecture: iphoneos-arm64e
+Version: 0.1.2
+Architecture: iphoneos-arm64
 Description: SpringBoard Dock, Search, and scroll-indicator behavior experiment.
 Maintainer: simongellesch4726-hash
 Author: simongellesch4726-hash
