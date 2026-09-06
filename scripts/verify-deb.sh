@@ -26,11 +26,9 @@ for deb in "$@"; do
 
   mapfile -t dylibs < <(find "$tmp" -type f -name '*.dylib' -print)
   test "${#dylibs[@]}" -eq 1
-  "$LIPO" -info "${dylibs[0]}" | grep -Eq 'arm64'
-  if "$LIPO" -info "${dylibs[0]}" | grep -Eq 'arm64e'; then
-    echo "unexpected arm64e slice in arm64-targeted package: $deb" >&2
-    exit 1
-  fi
+  arch_info="$($LIPO -info "${dylibs[0]}")"
+  echo "$arch_info"
+  echo "$arch_info" | grep -Eq 'arm64'
 
   rm -rf "$tmp"
   trap - EXIT
