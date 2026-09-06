@@ -1,137 +1,106 @@
-#import <UIKit/UIKit.h>
-#import <QuartzCore/QuartzCore.h>
+#import <Foundation/Foundation.h>
 #import <objc/runtime.h>
-#import <objc/message.h>
 #import <substrate.h>
 
-static const void *kRPFTrackedLabelKey = &kRPFTrackedLabelKey;
-static const void *kRPFControllerKey = &kRPFControllerKey;
-static const void *kRPFSessionStartKey = &kRPFSessionStartKey;
-static const void *kRPFInternalUpdateKey = &kRPFInternalUpdateKey;
+static void (*orig_SBRecordingIndicatorManager_setIndicatorVisible)(id, SEL, BOOL);
+static void (*orig_SBRecordingIndicatorManager_setIndicatorVisibleCamera)(id, SEL, BOOL, BOOL);
+static void (*orig_SBRecordingIndicatorManager_updateStatusBar)(id, SEL);
+static void (*orig_SBRecordingIndicatorManager_activityDidChange)(id, SEL, id);
 
-static void (*orig_SBRecordingIndicator_updateVisibility)(id, SEL, BOOL);
-static void (*orig_SBRecordingIndicator_updateVisibilitySkip)(id, SEL, BOOL, BOOL);
-static void (*orig_UILabel_setText)(UILabel *, SEL, NSString *);
+static const void *kRPFIndicatorHiddenKey = &kRPFIndicatorHiddenKey;
 
-static BOOL RPFParseElapsed(NSString *text, NSInteger *seconds) {
-    if (![text isKindOfClass:NSString.class]) return NO;
-    NSArray<NSString *> *parts = [text componentsSeparatedByString:@":"];
-    if (parts.count != 2 || parts[0].length == 0 || parts[0].length > 3 || parts[1].length != 2) return NO;
-
-    NSCharacterSet *digits = NSCharacterSet.decimalDigitCharacterSet;
-    if ([parts[0] rangeOfCharacterFromSet:digits.invertedSet].location != NSNotFound ||
-        [parts[1] rangeOfCharacterFromSet:digits.invertedSet].location != NSNotFound) return NO;
-
-    NSInteger minutes = parts[0].integerValue;
-    NSInteger secs = parts[1].integerValue;
-    if (secs < 0 || secs > 59) return NO;
-    if (seconds) *seconds = minutes * 60 + secs;
-    return YES;
+static BOOL RPFIsRecordingManager(id self) {
+    return self && [self isKindOfClass:NSClassFromString(@"SBRecordingIndicatorManager")];
 }
 
-static void RPFCollectTimerLabels(UIView *view, NSMutableArray<UILabel *> *labels) {
-    if ([view isKindOfClass:UILabel.class]) {
-        UILabel *label = (UILabel *)view;
-        NSInteger seconds = 0;
-        if (RPFParseElapsed(label.text, &seconds)) [labels addObject:label];
+static void RPFCallVisibilityUpdate(id self) {
+    if (!self) return;
+    SEL update = NSSelectorFromString(@"updateRecordingIndicatorForStatusBarChanges");
+    if ([self respondsToSelector:update]) {
+        ((void (*)(id, SEL))objc_msgSend)(self, update);
     }
-    for (UIView *subview in view.subviews) RPFCollectTimerLabels(subview, labels);
 }
 
-static NSArray<UILabel *> *RPFLabelsForController(id controller) {
-    SEL indicatorSelector = NSSelectorFromString(@"indicatorView");
-    if (![controller respondsToSelector:indicatorSelector]) return @[];
-
-    UIView *indicator = ((id (*)(id, SEL))objc_msgSend)(controller, indicatorSelector);
-    if (![indicator isKindOfClass:UIView.class]) return @[];
-
-    NSMutableArray<UILabel *> *labels = [NSMutableArray array];
-    RPFCollectTimerLabels(indicator, labels);
-    for (UILabel *label in labels) {
-        objc_setAssociatedObject(label, kRPFTrackedLabelKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        objc_setAssociatedObject(label, kRPFControllerKey, controller, OBJC_ASSOCIATION_ASSIGN);
-    }
-    return labels;
-}
-
-static CFTimeInterval RPFSessionStartForController(id controller) {
-    NSNumber *stored = objc_getAssociatedObject(controller, kRPFSessionStartKey);
-    return stored ? stored.doubleValue : 0;
-}
-
-static void RPFSetSessionStart(id controller, CFTimeInterval start) {
-    objc_setAssociatedObject(controller, kRPFSessionStartKey, @(start), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-}
-
-static void RPFRewriteLabel(UILabel *label, id controller) {
-    if (!objc_getAssociatedObject(label, kRPFTrackedLabelKey) || !controller) return;
-    if ([objc_getAssociatedObject(label, kRPFInternalUpdateKey) boolValue]) return;
-
-    NSInteger displayed = 0;
-    if (!RPFParseElapsed(label.text, &displayed)) return;
-
-    CFTimeInterval now = CACurrentMediaTime();
-    CFTimeInterval start = RPFSessionStartForController(controller);
-    if (start <= 0) {
-        start = now - displayed;
-        RPFSetSessionStart(controller, start);
+static void rpf_setIndicatorVisible(id self, SEL _cmd, BOOL visible) {
+    if (!RPFIsRecordingManager(self)) {
+        orig_SBRecordingIndicatorManager_setIndicatorVisible(self, _cmd, visible);
+        return;
     }
 
-    NSInteger expected = MAX(0, (NSInteger)floor(now - start));
-    // The system may recreate the visual timer after the indicator is hidden.
-    // Keep the persistent controller session as the source of truth in that case.
-    if (displayed > expected + 2) {
-        start = now - displayed;
-        RPFSetSessionStart(controller, start);
-        expected = displayed;
+    // Preserve SpringBoard's authoritative recording lifecycle. This hook only
+    // remembers that a presentation change hid the indicator; it never creates
+    // or advances a replacement timer.
+    objc_setAssociatedObject(self, kRPFIndicatorHiddenKey, @(!visible), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    orig_SBRecordingIndicatorManager_setIndicatorVisible(self, _cmd, visible);
+}
+
+static void rpf_setIndicatorVisibleCamera(id self, SEL _cmd, BOOL visible, BOOL cameraDelay) {
+    if (!RPFIsRecordingManager(self)) {
+        orig_SBRecordingIndicatorManager_setIndicatorVisibleCamera(self, _cmd, visible, cameraDelay);
+        return;
     }
 
-    NSString *replacement = [NSString stringWithFormat:@"%ld:%02ld", (long)(expected / 60), (long)(expected % 60)];
-    if ([label.text isEqualToString:replacement]) return;
-
-    objc_setAssociatedObject(label, kRPFInternalUpdateKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    label.text = replacement;
-    objc_setAssociatedObject(label, kRPFInternalUpdateKey, nil, OBJC_ASSOCIATION_ASSIGN);
+    objc_setAssociatedObject(self, kRPFIndicatorHiddenKey, @(!visible), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    orig_SBRecordingIndicatorManager_setIndicatorVisibleCamera(self, _cmd, visible, cameraDelay);
 }
 
-static void RPFRefreshController(id controller) {
-    for (UILabel *label in RPFLabelsForController(controller)) RPFRewriteLabel(label, controller);
+static void rpf_updateStatusBar(id self, SEL _cmd) {
+    if (!RPFIsRecordingManager(self)) {
+        orig_SBRecordingIndicatorManager_updateStatusBar(self, _cmd);
+        return;
+    }
+
+    orig_SBRecordingIndicatorManager_updateStatusBar(self, _cmd);
+
+    // If the same recording session is being shown again after a status-bar
+    // presentation change, ask the manager to perform its normal location /
+    // visibility synchronization. We deliberately do not touch the timer text.
+    if ([objc_getAssociatedObject(self, kRPFIndicatorHiddenKey) boolValue]) {
+        objc_setAssociatedObject(self, kRPFIndicatorHiddenKey, @NO, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        RPFCallVisibilityUpdate(self);
+    }
 }
 
-static void rpf_updateVisibility(id self, SEL _cmd, BOOL visible) {
-    orig_SBRecordingIndicator_updateVisibility(self, _cmd, visible);
-    if (!visible) return;
-    dispatch_async(dispatch_get_main_queue(), ^{ RPFRefreshController(self); });
-}
+static void rpf_activityDidChange(id self, SEL _cmd, id provider) {
+    if (!RPFIsRecordingManager(self)) {
+        orig_SBRecordingIndicatorManager_activityDidChange(self, _cmd, provider);
+        return;
+    }
 
-static void rpf_updateVisibilitySkip(id self, SEL _cmd, BOOL visible, BOOL skip) {
-    orig_SBRecordingIndicator_updateVisibilitySkip(self, _cmd, visible, skip);
-    if (!visible) return;
-    dispatch_async(dispatch_get_main_queue(), ^{ RPFRefreshController(self); });
-}
+    orig_SBRecordingIndicatorManager_activityDidChange(self, _cmd, provider);
 
-static void rpf_setText(UILabel *self, SEL _cmd, NSString *text) {
-    orig_UILabel_setText(self, _cmd, text);
-    if (!objc_getAssociatedObject(self, kRPFTrackedLabelKey)) return;
-    if ([objc_getAssociatedObject(self, kRPFInternalUpdateKey) boolValue]) return;
-    RPFRewriteLabel(self, objc_getAssociatedObject(self, kRPFControllerKey));
+    // The manager owns the recording state. Re-run only its normal placement
+    // path after a sensor/activity transition; no synthetic elapsed clock is used.
+    RPFCallVisibilityUpdate(self);
 }
 
 %ctor {
     @autoreleasepool {
-        Class controller = objc_getClass("SBRecordingIndicatorViewController");
-        if (!controller) return;
+        Class manager = objc_getClass("SBRecordingIndicatorManager");
+        if (!manager) return;
 
-        SEL visibility = NSSelectorFromString(@"updateIndicatorVisibility:");
-        if (class_respondsToSelector(controller, visibility)) {
-            MSHookMessageEx(controller, visibility, (IMP)rpf_updateVisibility, (IMP *)&orig_SBRecordingIndicator_updateVisibility);
+        SEL setVisible = @selector(setIndicatorVisible:);
+        if (class_respondsToSelector(manager, setVisible)) {
+            MSHookMessageEx(manager, setVisible, (IMP)rpf_setIndicatorVisible,
+                            (IMP *)&orig_SBRecordingIndicatorManager_setIndicatorVisible);
         }
 
-        SEL visibilitySkip = NSSelectorFromString(@"updateIndicatorVisibility:skipFadeOutAnimation:");
-        if (class_respondsToSelector(controller, visibilitySkip)) {
-            MSHookMessageEx(controller, visibilitySkip, (IMP)rpf_updateVisibilitySkip, (IMP *)&orig_SBRecordingIndicator_updateVisibilitySkip);
+        SEL setVisibleCamera = NSSelectorFromString(@"setIndicatorVisible:allowStatusBarDelayForCameraApp:");
+        if (class_respondsToSelector(manager, setVisibleCamera)) {
+            MSHookMessageEx(manager, setVisibleCamera, (IMP)rpf_setIndicatorVisibleCamera,
+                            (IMP *)&orig_SBRecordingIndicatorManager_setIndicatorVisibleCamera);
         }
 
-        MSHookMessageEx(UILabel.class, @selector(setText:), (IMP)rpf_setText, (IMP *)&orig_UILabel_setText);
+        SEL updateStatusBar = NSSelectorFromString(@"updateRecordingIndicatorForStatusBarChanges");
+        if (class_respondsToSelector(manager, updateStatusBar)) {
+            MSHookMessageEx(manager, updateStatusBar, (IMP)rpf_updateStatusBar,
+                            (IMP *)&orig_SBRecordingIndicatorManager_updateStatusBar);
+        }
+
+        SEL activityChanged = @selector(activityDidChangeForSensorActivityDataProvider:);
+        if (class_respondsToSelector(manager, activityChanged)) {
+            MSHookMessageEx(manager, activityChanged, (IMP)rpf_activityDidChange,
+                            (IMP *)&orig_SBRecordingIndicatorManager_activityDidChange);
+        }
     }
 }
