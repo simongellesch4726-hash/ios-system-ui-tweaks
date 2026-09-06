@@ -1,9 +1,11 @@
 #import <UIKit/UIKit.h>
 #import <QuartzCore/QuartzCore.h>
 #import <objc/runtime.h>
+#import <objc/message.h>
 #import <substrate.h>
 
 static const void *kRPFTrackedLabelKey = &kRPFTrackedLabelKey;
+static const void *kRPFControllerKey = &kRPFControllerKey;
 static const void *kRPFSessionStartKey = &kRPFSessionStartKey;
 static const void *kRPFInternalUpdateKey = &kRPFInternalUpdateKey;
 
@@ -47,6 +49,7 @@ static NSArray<UILabel *> *RPFLabelsForController(id controller) {
     RPFCollectTimerLabels(indicator, labels);
     for (UILabel *label in labels) {
         objc_setAssociatedObject(label, kRPFTrackedLabelKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        objc_setAssociatedObject(label, kRPFControllerKey, controller, OBJC_ASSOCIATION_ASSIGN);
     }
     return labels;
 }
@@ -61,7 +64,7 @@ static void RPFSetSessionStart(id controller, CFTimeInterval start) {
 }
 
 static void RPFRewriteLabel(UILabel *label, id controller) {
-    if (!objc_getAssociatedObject(label, kRPFTrackedLabelKey)) return;
+    if (!objc_getAssociatedObject(label, kRPFTrackedLabelKey) || !controller) return;
     if ([objc_getAssociatedObject(label, kRPFInternalUpdateKey) boolValue]) return;
 
     NSInteger displayed = 0;
@@ -111,19 +114,7 @@ static void rpf_setText(UILabel *self, SEL _cmd, NSString *text) {
     orig_UILabel_setText(self, _cmd, text);
     if (!objc_getAssociatedObject(self, kRPFTrackedLabelKey)) return;
     if ([objc_getAssociatedObject(self, kRPFInternalUpdateKey) boolValue]) return;
-
-    // A tracked label is only created from the authoritative recording-indicator view.
-    // Its controller is recovered by walking the responder chain when the system refreshes it.
-    UIResponder *responder = self;
-    id controller = nil;
-    while (responder) {
-        if ([NSStringFromClass(responder.class) isEqualToString:@"SBRecordingIndicatorViewController"]) {
-            controller = responder;
-            break;
-        }
-        responder = responder.nextResponder;
-    }
-    if (controller) RPFRewriteLabel(self, controller);
+    RPFRewriteLabel(self, objc_getAssociatedObject(self, kRPFControllerKey));
 }
 
 %ctor {
