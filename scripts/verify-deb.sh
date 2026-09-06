@@ -13,7 +13,7 @@ fi
 for deb in "$@"; do
   echo "==> $deb"
   test -f "$deb"
-  test "$(dpkg-deb -f "$deb" Architecture)" = "iphoneos-arm64"
+  test "$(dpkg-deb -f "$deb" Architecture)" = "iphoneos-arm64e"
 
   tmp="$(mktemp -d)"
   trap 'rm -rf "$tmp"' EXIT
@@ -28,8 +28,8 @@ for deb in "$@"; do
   test "${#dylibs[@]}" -eq 1
   arch_info="$($LIPO -info "${dylibs[0]}")"
   echo "$arch_info"
-  if ! echo "$arch_info" | grep -Eq '(^|[^[:alnum:]])arm64([^[:alnum:]]|$)'; then
-    echo "expected arm64 Mach-O slice in ${dylibs[0]}" >&2
+  if ! echo "$arch_info" | grep -Eq '(^|[^[:alnum:]])arm64e([^[:alnum:]]|$)'; then
+    echo "expected arm64e Mach-O slice in ${dylibs[0]}" >&2
     exit 1
   fi
 
