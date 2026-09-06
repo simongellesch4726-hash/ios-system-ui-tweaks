@@ -13,7 +13,7 @@ fi
 for deb in "$@"; do
   echo "==> $deb"
   test -f "$deb"
-  test "$(dpkg-deb -f "$deb" Architecture)" = "iphoneos-arm64e"
+  test "$(dpkg-deb -f "$deb" Architecture)" = "iphoneos-arm64"
 
   tmp="$(mktemp -d)"
   trap 'rm -rf "$tmp"' EXIT
@@ -26,7 +26,11 @@ for deb in "$@"; do
 
   mapfile -t dylibs < <(find "$tmp" -type f -name '*.dylib' -print)
   test "${#dylibs[@]}" -eq 1
-  "$LIPO" -info "${dylibs[0]}" | grep -Eq 'arm64e'
+  "$LIPO" -info "${dylibs[0]}" | grep -Eq 'arm64'
+  if "$LIPO" -info "${dylibs[0]}" | grep -Eq 'arm64e'; then
+    echo "unexpected arm64e slice in arm64-targeted package: $deb" >&2
+    exit 1
+  fi
 
   rm -rf "$tmp"
   trap - EXIT
