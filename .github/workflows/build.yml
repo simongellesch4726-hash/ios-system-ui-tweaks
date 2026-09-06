@@ -2,9 +2,9 @@ name: Build tweaks
 
 on:
   push:
-    branches: [ main ]
+    branches: [main]
   pull_request:
-    branches: [ main ]
+    branches: [main]
   workflow_dispatch:
 
 concurrency:
@@ -13,32 +13,39 @@ concurrency:
 
 jobs:
   build:
-    runs-on: macos-14
+    runs-on: ubuntu-24.04
     env:
       THEOS: ${{ github.workspace }}/theos
+      THEOS_PACKAGE_SCHEME: roothide
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        shell: bash
+        run: |
+          set -euxo pipefail
+          for i in $(seq 1 60); do
+            if ! fuser /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock >/dev/null 2>&1; then break; fi
+            sleep 2
+          done
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ca-certificates curl git make perl python3 clang llvm lld dpkg-dev fakeroot xz-utils file
 
       - name: Install RootHide Theos
         shell: bash
         run: |
           set -euxo pipefail
-          curl -fsSL https://raw.githubusercontent.com/roothide/theos/master/bin/install-theos -o install-theos.sh
-          bash install-theos.sh
+          git clone --depth=1 --recursive https://github.com/roothide/theos.git "$THEOS"
           test -f "$THEOS/makefiles/common.mk"
+          "$THEOS/bin/install-sdk" latest
+          find "$THEOS/sdks" -maxdepth 1 -name '*.sdk' -print -quit | grep -q .
 
       - name: Build RecordingPillFix
-        shell: bash
-        run: |
-          set -euxo pipefail
-          make -C RecordingPillFix clean package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=roothide
+        run: make -C RecordingPillFix clean package FINALPACKAGE=1
 
       - name: Build iOS26UI
-        shell: bash
-        run: |
-          set -euxo pipefail
-          make -C iOS26UI clean package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=roothide
+        run: make -C iOS26UI clean package FINALPACKAGE=1
 
       - name: Verify packages
         shell: bash
