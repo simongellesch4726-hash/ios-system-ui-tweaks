@@ -47,9 +47,6 @@ static void RPFUpdateLabel(UILabel *label) {
     CFTimeInterval now = CACurrentMediaTime();
     NSInteger expected = RPFSessionStart > 0 ? MAX(0, (NSInteger)floor(now - RPFSessionStart)) : -1;
 
-    // A small backwards discrepancy is expected when the system reuses a view.
-    // Only reseed when the system timer clearly moved backwards, indicating a
-    // genuinely new recording session rather than a temporary pill dismissal.
     if (RPFSessionStart == 0 || displayed + 5 < expected) {
         RPFSessionStart = now - displayed;
         expected = displayed;
@@ -74,7 +71,3 @@ static void RPFUpdateLabel(UILabel *label) {
     if (!RPFInternalTextUpdate) RPFUpdateLabel(self);
 }
 %end
-
-%ctor {
-    if (!@available(iOS 15.0, *)) return;
-}
