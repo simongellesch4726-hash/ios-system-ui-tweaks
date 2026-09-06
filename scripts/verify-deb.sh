@@ -1,6 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+if [[ -n "${THEOS:-}" && -x "$THEOS/toolchain/linux/iphone/bin/lipo" ]]; then
+  LIPO="$THEOS/toolchain/linux/iphone/bin/lipo"
+elif command -v lipo >/dev/null 2>&1; then
+  LIPO="$(command -v lipo)"
+else
+  echo "lipo is required for Mach-O architecture verification" >&2
+  exit 1
+fi
+
 for deb in "$@"; do
   echo "==> $deb"
   test -f "$deb"
@@ -17,7 +26,7 @@ for deb in "$@"; do
 
   dylibs=( $(find "$tmp" -type f -name '*.dylib' -print) )
   test "${#dylibs[@]}" -eq 1
-  lipo -info "${dylibs[0]}" | grep -Eq 'arm64e'
+  "$LIPO" -info "${dylibs[0]}" | grep -Eq 'arm64e'
 
   rm -rf "$tmp"
   trap - EXIT
