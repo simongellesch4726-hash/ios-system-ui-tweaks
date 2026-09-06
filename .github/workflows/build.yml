@@ -2,35 +2,61 @@ name: Build tweaks
 
 on:
   push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
   workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   build:
-    runs-on: macos-latest
+    runs-on: macos-14
+    env:
+      THEOS: ${{ github.workspace }}/theos
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
+
       - name: Install RootHide Theos
+        shell: bash
         run: |
-          git clone --depth=1 https://github.com/roothide/theos.git "$HOME/theos"
-          echo "THEOS=$HOME/theos" >> "$GITHUB_ENV"
+          set -euxo pipefail
+          curl -fsSL https://raw.githubusercontent.com/roothide/theos/master/bin/install-theos -o install-theos.sh
+          bash install-theos.sh
+          test -f "$THEOS/makefiles/common.mk"
+
       - name: Build RecordingPillFix
+        shell: bash
         run: |
-          make -C RecordingPillFix clean
-          make -C RecordingPillFix package FINALPACKAGE=1
+          set -euxo pipefail
+          make -C RecordingPillFix clean package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=roothide
+
       - name: Build iOS26UI
+        shell: bash
         run: |
-          make -C iOS26UI clean
-          make -C iOS26UI package FINALPACKAGE=1
+          set -euxo pipefail
+          make -C iOS26UI clean package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=roothide
+
       - name: Verify packages
+        shell: bash
         run: |
+          set -euxo pipefail
           chmod +x scripts/verify-deb.sh
           scripts/verify-deb.sh RecordingPillFix/packages/*.deb iOS26UI/packages/*.deb
+
       - name: Collect packages
+        shell: bash
         run: |
+          set -euxo pipefail
           mkdir -p artifacts
-          cp RecordingPillFix/packages/*.deb artifacts/
-          cp iOS26UI/packages/*.deb artifacts/
-      - uses: actions/upload-artifact@v4
+          find RecordingPillFix/packages iOS26UI/packages -type f -name '*.deb' -print -exec cp {} artifacts/ \;
+          test "$(find artifacts -type f -name '*.deb' | wc -l | tr -d ' ')" -eq 2
+
+      - name: Upload packages
+        uses: actions/upload-artifact@v4
         with:
           name: ios-system-ui-tweaks-debs
           path: artifacts/*.deb
