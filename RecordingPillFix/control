@@ -1,0 +1,9 @@
+Package: com.simongellesch.recordingpillfix
+Name: RecordingPillFix
+Version: 0.1.0
+Architecture: iphoneos-arm64e
+Description: Keeps the screen recording elapsed-time indicator synchronized across presentation changes.
+Maintainer: simongellesch4726-hash
+Author: simongellesch4726-hash
+Section: Tweaks
+Depends: mobilesubstrate (>= 0.9.5000)
