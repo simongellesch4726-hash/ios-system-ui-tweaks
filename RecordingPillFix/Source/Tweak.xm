@@ -1,40 +1,51 @@
 #import <UIKit/UIKit.h>
+#import <QuartzCore/QuartzCore.h>
 #import <objc/runtime.h>
 
-static CFTimeInterval sessionStart = 0;
-static CFTimeInterval lastSeen = 0;
+static CFTimeInterval RPFSessionStart = 0;
 
-static BOOL RPFIsElapsedTime(NSString *text) {
+static BOOL RPFParseElapsed(NSString *text, NSInteger *seconds) {
     if (!text) return NO;
-    NSRegularExpression *re = [NSRegularExpression regularExpressionWithPattern:@"^\\d{1,2}:\\d{2}$" options:0 error:nil];
-    return [re firstMatchInString:text options:0 range:NSMakeRange(0, text.length)] != nil;
+    NSArray<NSString *> *parts = [text componentsSeparatedByString:@":"];
+    if (parts.count != 2 || parts[0].length == 0 || parts[0].length > 3 || parts[1].length != 2) return NO;
+    NSCharacterSet *digits = [NSCharacterSet decimalDigitCharacterSet];
+    if ([parts[0] rangeOfCharacterFromSet:[digits invertedSet]].location != NSNotFound ||
+        [parts[1] rangeOfCharacterFromSet:[digits invertedSet]].location != NSNotFound) return NO;
+    NSInteger value = parts[0].integerValue * 60 + parts[1].integerValue;
+    if (seconds) *seconds = value;
+    return YES;
 }
 
 static BOOL RPFHasRecordingAppearance(UIView *view) {
     for (UIView *v = view; v; v = v.superview) {
         UIColor *color = v.backgroundColor;
         CGFloat r = 0, g = 0, b = 0, a = 0;
-        if (color && [color getRed:&r green:&g blue:&b alpha:&a] && a > 0.5 && r > 0.45 && r > g * 1.5 && r > b * 1.5)
-            return YES;
+        if (color && [color getRed:&r green:&g blue:&b alpha:&a] && a > 0.5 && r > 0.45 && r > g * 1.5 && r > b * 1.5) return YES;
     }
     return NO;
 }
 
+static BOOL RPFIsCandidate(UILabel *label, NSInteger *systemSeconds) {
+    if (!label.window || !RPFHasRecordingAppearance(label)) return NO;
+    return RPFParseElapsed(label.text, systemSeconds);
+}
+
 static void RPFUpdateLabel(UILabel *label) {
-    if (!RPFIsElapsedTime(label.text) || !RPFHasRecordingAppearance(label)) return;
+    NSInteger displayed = 0;
+    if (!RPFIsCandidate(label, &displayed)) return;
 
     CFTimeInterval now = CACurrentMediaTime();
-    if (sessionStart == 0 || (lastSeen > 0 && now - lastSeen > 15.0)) {
-        // The first observed system value seeds the monotonic session clock.
-        NSArray<NSString *> *parts = [label.text componentsSeparatedByString:@":"];
-        NSInteger seed = parts.count == 2 ? parts[0].integerValue * 60 + parts[1].integerValue : 0;
-        sessionStart = now - seed;
-    }
-    lastSeen = now;
+    NSInteger expected = RPFSessionStart > 0 ? MAX(0, (NSInteger)floor(now - RPFSessionStart)) : -1;
 
-    NSInteger elapsed = MAX(0, (NSInteger)floor(now - sessionStart));
-    NSString *expected = [NSString stringWithFormat:@"%ld:%02ld", (long)(elapsed / 60), (long)(elapsed % 60)];
-    if (![label.text isEqualToString:expected]) label.text = expected;
+    // Seed once, and reset only when the authoritative UI reports a genuine
+    // restart rather than because the pill was hidden for some time.
+    if (RPFSessionStart == 0 || displayed + 5 < expected) {
+        RPFSessionStart = now - displayed;
+        expected = displayed;
+    }
+
+    NSString *text = [NSString stringWithFormat:@"%ld:%02ld", (long)(expected / 60), (long)(expected % 60)];
+    if (![label.text isEqualToString:text]) label.text = text;
 }
 
 %hook UILabel
@@ -42,6 +53,7 @@ static void RPFUpdateLabel(UILabel *label) {
     %orig;
     if (self.window) RPFUpdateLabel(self);
 }
+
 - (void)setText:(NSString *)text {
     %orig(text);
     RPFUpdateLabel(self);
@@ -49,7 +61,5 @@ static void RPFUpdateLabel(UILabel *label) {
 %end
 
 %ctor {
-    if (@available(iOS 15.0, *)) {
-        // Runtime-scoped to SpringBoard by the filter plist.
-    }
+    if (!@available(iOS 15.0, *)) return;
 }
